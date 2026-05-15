@@ -1,0 +1,25 @@
+name: astrbot_plugin_api_mgr
+display_name: API 管理器
+desc: 管理模型提供商、API Key、负载均衡及自动容错，支持额度查询。
+short_desc: 模型提供商与 API 管理器
+author: Antigravity
+version: 1.0.0
+repo: https://github.com/yukikazechan/astrbot_plugin_api_mgr
+priority: 100
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - discord
+  - wecom
+  - lark
+  - dingtalk
+  - satori
+  - kook
+  - vocechat
+  - weixin_official_account
+  - satori
+  - misskey
+  - line
+  - matrix
+  - mattermost
