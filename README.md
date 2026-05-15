@@ -20,7 +20,7 @@
 2. **手动安装**：
    ```bash
    cd data/plugins
-   git clone https://github.com/your-username/astrbot_plugin_api_mgr
+   git clone https://github.com/KardeniaPoyu/astrbot_plugin_api_mgr
    ```
    完成后重启 AstrBot 或在 WebUI 点击“重载插件”。
 

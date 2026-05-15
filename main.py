@@ -6,7 +6,7 @@ from .api_service import ApiService
 
 logger = logging.getLogger("astrbot.api_mgr")
 
-@register("api_mgr", "Antigravity", "管理模型提供商及 API Key，自动根据 API 情况调整模型，显示剩余额度。", "1.0.0", "https://github.com/yukikazechan/astrbot_plugin_api_mgr")
+@register("api_mgr", "KardeniaPoyu", "管理模型提供商及 API Key，自动根据 API 情况调整模型，显示剩余额度。", "1.0.0", "https://github.com/KardeniaPoyu/astrbot_plugin_api_mgr")
 class ApiMgrPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -20,7 +20,25 @@ class ApiMgrPlugin(Star):
         self.groups = await self.get_kv_data("groups", {"default": []})
         self.provider_types = await self.get_kv_data("provider_types", {})
         self.balance_cache = {} # provider_id -> balance_info
-        self.min_balance = await self.get_kv_data("min_balance", 0.01) # Minimum balance to consider a provider "available"
+        self.min_balance = await self.get_kv_data("min_balance", 0.01)
+
+    def _get_provider_type(self, p):
+        p_id = p.provider_config.get("id", "").lower()
+        if p_id in self.provider_types:
+            return self.provider_types[p_id]
+        
+        # Auto-detection
+        base_url = p.provider_config.get("base_url", "").lower()
+        if "deepseek" in p_id or "deepseek" in base_url:
+            return "deepseek"
+        if "siliconflow" in p_id or "siliconflow" in base_url:
+            return "siliconflow"
+        if "moonshot" in p_id or "kimi" in p_id or "moonshot" in base_url:
+            return "moonshot"
+        if "oneapi" in p_id or "newapi" in p_id:
+            return "oneapi"
+        
+        return "none"
 
     @filter.command_group("api")
     def api_group(self):
@@ -35,27 +53,43 @@ class ApiMgrPlugin(Star):
             return
         
         msg = "当前已配置的提供商:\n"
-        for p in providers:
+        for i, p in enumerate(providers):
             p_id = p.provider_config.get("id", "Unknown")
             p_type = p.provider_config.get("type", "Unknown")
-            saved_type = self.provider_types.get(p_id, "Auto")
+            detected_type = self._get_provider_type(p)
             balance_str = ""
             if p_id in self.balance_cache:
                 b = self.balance_cache[p_id]
                 balance_str = f" | 余额: {b.get('remaining', '?')} {b.get('unit', '')}"
-            msg += f"- ID: {p_id} | 类型: {p_type} | 查询类型: {saved_type}{balance_str}\n"
+            msg += f"{i+1}. ID: {p_id} | 类型: {p_type} | 余额查询: {detected_type}{balance_str}\n"
         
         yield event.plain_result(msg)
 
     @api_group.command("set_type")
     async def set_provider_type(self, event: AstrMessageEvent, provider_id: str, provider_type: str):
-        """设置提供商的余额查询类型 (deepseek, siliconflow, moonshot, oneapi)"""
-        valid_types = ["deepseek", "siliconflow", "moonshot", "oneapi", "none"]
+        """设置提供商的余额查询类型 (deepseek, siliconflow, moonshot, oneapi, none, auto)"""
+        valid_types = ["deepseek", "siliconflow", "moonshot", "oneapi", "none", "auto"]
+        provider_type = provider_type.lower()
         if provider_type not in valid_types:
             yield event.plain_result(f"无效的类型。支持: {', '.join(valid_types)}")
             return
         
-        self.provider_types[provider_id] = provider_type
+        # Support numeric ID if needed
+        providers = self.context.get_all_providers()
+        if provider_id.isdigit():
+            idx = int(provider_id) - 1
+            if 0 <= idx < len(providers):
+                provider_id = providers[idx].provider_config.get("id")
+            else:
+                yield event.plain_result(f"序号 {provider_id} 超出范围。")
+                return
+
+        if provider_type == "auto":
+            if provider_id in self.provider_types:
+                del self.provider_types[provider_id]
+        else:
+            self.provider_types[provider_id] = provider_type
+            
         await self.put_kv_data("provider_types", self.provider_types)
         yield event.plain_result(f"已将 {provider_id} 的余额查询类型设置为 {provider_type}")
 
@@ -73,13 +107,22 @@ class ApiMgrPlugin(Star):
         
         target_providers = []
         if provider_id:
-            p = self.context.get_provider_by_id(provider_id)
-            if p: target_providers.append(p)
+            # Support numeric ID
+            if provider_id.isdigit():
+                idx = int(provider_id) - 1
+                if 0 <= idx < len(providers):
+                    target_providers.append(providers[idx])
+                else:
+                    yield event.plain_result(f"序号 {provider_id} 超出范围。")
+                    return
             else:
-                yield event.plain_result(f"未找到 ID 为 {provider_id} 的提供商。")
-                return
+                p = self.context.get_provider_by_id(provider_id)
+                if p: target_providers.append(p)
+                else:
+                    yield event.plain_result(f"未找到 ID 为 {provider_id} 的提供商。")
+                    return
         else:
-            target_providers = [p for p in providers if p.provider_config.get("id") in self.provider_types]
+            target_providers = [p for p in providers if self._get_provider_type(p) != "none"]
 
         if not target_providers:
             yield event.plain_result("没有可查询余额的提供商。请先使用 /api set_type 设置类型。")
@@ -90,8 +133,8 @@ class ApiMgrPlugin(Star):
         results = []
         for p in target_providers:
             p_id = p.provider_config.get("id")
-            p_type = self.provider_types.get(p_id)
-            if not p_type or p_type == "none": continue
+            p_type = self._get_provider_type(p)
+            if p_type == "none": continue
             
             api_key = p.provider_config.get("api_key")
             base_url = p.provider_config.get("base_url")
@@ -104,6 +147,7 @@ class ApiMgrPlugin(Star):
                 results.append(f"✅ {p_id}: 剩余 {balance['remaining']} {balance['unit']}")
         
         yield event.plain_result("\n".join(results))
+
 
     @api_group.command("group")
     async def manage_groups(self, event: AstrMessageEvent, action: str, group_name: str = None, *provider_ids: str):
