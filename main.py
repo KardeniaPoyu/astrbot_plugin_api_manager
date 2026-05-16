@@ -21,6 +21,7 @@ class ApiMgrPlugin(Star):
         self.provider_types = await self.get_kv_data("provider_types", {})
         self.balance_cache = {} # provider_id -> balance_info
         self.min_balance = await self.get_kv_data("min_balance", 0.01)
+        self.usage_cache = await self.get_kv_data("usage_cache", {})
 
     def _get_provider_type(self, p):
         p_id = p.provider_config.get("id", "").lower()
@@ -40,6 +41,8 @@ class ApiMgrPlugin(Star):
             return "moonshot"
         if "oneapi" in p_id or "newapi" in p_id:
             return "oneapi"
+        if "aliyun" in p_id or "dashscope" in p_id or "dashscope" in base_url or "qwen" in p_id:
+            return "aliyun"
         
         return "none"
 
@@ -49,29 +52,42 @@ class ApiMgrPlugin(Star):
 
     @api_group.command("list")
     async def list_providers(self, event: AstrMessageEvent):
-        """列出所有已配置的提供商及其 ID"""
-        providers = self.context.get_all_providers()
+        """列出所有已配置的提供商及其 ID 和状态"""
+        providers = list(self.context.get_all_providers())
         if not providers:
             yield event.plain_result("未发现任何已配置的提供商。")
             return
         
-        msg = "当前已配置的提供商:\n"
+        provider_using = self.context.get_using_provider(umo=event.unified_msg_origin)
+        msg = "当前已配置的提供商状态:\n"
         for i, p in enumerate(providers):
             p_id = p.provider_config.get("id", "Unknown")
-            p_type = p.provider_config.get("type", "Unknown")
+            config = p.provider_config.get("config", {})
+            model = config.get("model") or p.provider_config.get("model", "未知")
             detected_type = self._get_provider_type(p)
+            
             balance_str = ""
             if p_id in self.balance_cache:
                 b = self.balance_cache[p_id]
-                balance_str = f" | 余额: {b.get('remaining', '?')} {b.get('unit', '')}"
-            msg += f"{i+1}. ID: {p_id} | 类型: {p_type} | 余额查询: {detected_type}{balance_str}\n"
+                if b.get("error"):
+                    balance_str = f" | 余额状态: ❌ {b['error']}"
+                else:
+                    balance_str = f" | 余额状态: {b.get('remaining', '?')} {b.get('unit', '')}"
+                    
+            usage = self.usage_cache.get(p_id, 0)
+            
+            active_mark = ""
+            if provider_using and provider_using.meta().id == p_id:
+                active_mark = " 👈 (当前)"
+                
+            msg += f"{i+1}. {p_id} ({model}){active_mark}\n   ↳ 探针类型: {detected_type}{balance_str} | 成功路由次数: {usage}\n"
         
         yield event.plain_result(msg)
 
     @api_group.command("set_type")
     async def set_provider_type(self, event: AstrMessageEvent, provider_id: str, provider_type: str):
-        """设置提供商的余额查询类型 (deepseek, siliconflow, moonshot, oneapi, none, auto)"""
-        valid_types = ["deepseek", "siliconflow", "moonshot", "oneapi", "none", "auto"]
+        """设置提供商的余额查询类型 (deepseek, siliconflow, moonshot, oneapi, aliyun, none, auto)"""
+        valid_types = ["deepseek", "siliconflow", "moonshot", "oneapi", "aliyun", "none", "auto"]
         provider_type = provider_type.lower()
         if provider_type not in valid_types:
             yield event.plain_result(f"无效的类型。支持: {', '.join(valid_types)}")
@@ -142,14 +158,17 @@ class ApiMgrPlugin(Star):
             config = p.provider_config.get("config", {})
             api_key = p.provider_config.get("api_key") or config.get("api_key")
             base_url = p.provider_config.get("base_url") or config.get("base_url")
+            model_name = config.get("model") or p.provider_config.get("model")
             
             if not api_key:
                 results.append(f"❌ {p_id}: 未找到 API Key")
                 continue
                 
-            balance = await ApiService.get_balance(p_type, api_key, base_url)
+            balance = await ApiService.get_balance(p_type, api_key, base_url, model_name)
             if "error" in balance:
                 results.append(f"❌ {p_id}: 查询失败 ({balance['error']})")
+                if "remaining" in balance:
+                    self.balance_cache[p_id] = balance # Force 0 balance into cache for auto-routing
             else:
                 self.balance_cache[p_id] = balance
                 results.append(f"✅ {p_id}: 剩余 {balance['remaining']} {balance['unit']}")
@@ -236,6 +255,24 @@ class ApiMgrPlugin(Star):
 
         logger.debug(f"API Manager: Routing session {event.unified_msg_origin} to {selected_provider_id}")
         event.set_extra("selected_provider", selected_provider_id)
+        
+        # 记录路由次数
+        self.usage_cache[selected_provider_id] = self.usage_cache.get(selected_provider_id, 0) + 1
+        await self.put_kv_data("usage_cache", self.usage_cache)
+        
+        # 正式持久化切换（参考 /provider 的底层实现，并且仅当真正发生切换时才执行，并通知用户）
+        current_provider = self.context.get_using_provider(umo=event.unified_msg_origin)
+        if current_provider and current_provider.meta().id != selected_provider_id:
+            try:
+                from astrbot.core.provider.entities import ProviderType
+                await self.context.provider_manager.set_provider(
+                    provider_id=selected_provider_id,
+                    provider_type=ProviderType.CHAT_COMPLETION,
+                    umo=event.unified_msg_origin
+                )
+                yield event.plain_result(f"♻️ [API 自动路由] 当前提供商 ({current_provider.meta().id}) 额度不足或不可用，已自动为您无缝切换至备用提供商: {selected_provider_id}")
+            except Exception as e:
+                logger.error(f"API Manager: Failed to set provider via ProviderManager: {e}")
         
         # 可选：配置 fallback 链
         fallbacks = [p for p in group_providers if p != selected_provider_id]

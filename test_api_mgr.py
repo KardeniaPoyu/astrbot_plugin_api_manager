@@ -12,19 +12,20 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     
     # This is a test script for the developer/user to verify their keys
-    # Usage: python test_api_mgr.py <provider_type> <api_key> [base_url]
-    
     if len(sys.argv) < 3:
-        print("Usage: python test_api_mgr.py <provider_type> <api_key> [base_url]")
-        print("Example: python test_api_mgr.py siliconflow sk-xxxx")
+        print("Usage: python test_api_mgr.py <provider_type> <api_key> [base_url] [model_name]")
+        print("Supported types: deepseek, siliconflow, moonshot, oneapi, aliyun")
+        print("Example 1: python test_api_mgr.py siliconflow sk-xxxx")
+        print("Example 2: python test_api_mgr.py aliyun sk-xxxx https://... qwen-plus")
         return
 
     provider_type = sys.argv[1]
     api_key = sys.argv[2]
     base_url = sys.argv[3] if len(sys.argv) > 3 else None
+    model_name = sys.argv[4] if len(sys.argv) > 4 else None
 
-    print(f"Testing {provider_type}...")
-    result = await ApiService.get_balance(provider_type, api_key, base_url)
+    print(f"Testing {provider_type} (Model: {model_name or 'Default'})...")
+    result = await ApiService.get_balance(provider_type, api_key, base_url, model_name)
     
     if "error" in result:
         print(f"[FAIL] Error: {result['error']}")

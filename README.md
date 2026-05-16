@@ -4,12 +4,13 @@
 
 ## 🌟 功能特性
 
-- **多渠道余额查询**：支持 DeepSeek, SiliconFlow, Moonshot (Kimi), OneAPI/NewAPI 等主流提供商。
+- **多渠道状态感知**：支持 DeepSeek, SiliconFlow, Moonshot (Kimi), 阿里云(DashScope), OneAPI/NewAPI 等主流提供商的查询探测。
 - **路由分组 (Router Groups)**：可将模型划分为不同组（如 `fast`, `smart`, `cheap`），根据需求灵活切换。
 - **智能自动路由**：
     - **优先级排序**：根据配置顺序选择第一个可用的提供商。
     - **余额感应**：自动跳过余额不足（低于设定阈值）的提供商。
     - **自动 Fallback**：自动配置备用模型链，确保对话不中断。
+- **使用情况追踪**：在 `/api list` 中直观展示各路由实例的使用次数。
 - **简易配置**：全指令操作，无需手动修改配置文件。
 
 ## 🚀 安装
@@ -28,8 +29,9 @@
 
 ### 1. 提供商管理
 - `/api list`：列出当前已配置的所有模型提供商 ID。
-- `/api set_type <provider_id> <type>`：设置提供商的余额查询类型。
-    - 支持类型：`deepseek`, `siliconflow`, `moonshot`, `oneapi`, `none`。
+- `/api set_type <provider_id> <type>`：设置提供商的余额查询或探针类型。
+    - 支持类型：`deepseek`, `siliconflow`, `moonshot`, `oneapi`, `aliyun`, `none`, `auto`。
+        - *注：阿里云(aliyun)官方不支持查询余额，该模式将执行轻量级健康度探测以校验 Key 是否可用。*
 - `/api balance [provider_id]`：查询指定或所有提供商的账户余额并刷新缓存。
 
 ### 2. 路由与分组

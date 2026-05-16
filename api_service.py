@@ -11,7 +11,7 @@ class ApiService:
         Returns a dict with 'total', 'used', 'remaining' and 'unit'.
         """
     @staticmethod
-    async def get_balance(provider_type: str, api_key: str, base_url: str = None) -> dict:
+    async def get_balance(provider_type: str, api_key: str, base_url: str = None, model_name: str = None) -> dict:
         """
         Query balance for different providers.
         Returns a dict with 'total', 'used', 'remaining' and 'unit'.
@@ -25,6 +25,8 @@ class ApiService:
                 return await ApiService._query_moonshot(api_key)
             elif provider_type == "oneapi":
                 return await ApiService._query_oneapi(api_key, base_url)
+            elif provider_type == "aliyun":
+                return await ApiService._query_aliyun(api_key, model_name)
             else:
                 return {"error": f"Unsupported provider type: {provider_type}"}
         except Exception as e:
@@ -62,6 +64,47 @@ class ApiService:
                 if isinstance(err, dict):
                     return {"error": err.get("message", "Unknown error")}
                 return {"error": str(err) or "Unknown error"}
+
+    @staticmethod
+    async def _query_aliyun(api_key: str, model_name: str = None):
+        url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # If no model configured, fallback to probing qwen-turbo
+        test_model = model_name if model_name else "qwen-turbo"
+        
+        payload = {
+            "model": test_model,
+            "messages": [{"role": "user", "content": "1"}],
+            "max_tokens": 1
+        }
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    data = await resp.json()
+                    if resp.status == 200:
+                        return {
+                            "total": 999999,
+                            "used": 0,
+                            "remaining": 999999,
+                            "unit": f"Valid ({test_model} OK)"
+                        }
+                    else:
+                        err_msg = "Unknown error"
+                        if isinstance(data, dict) and "error" in data:
+                            err = data["error"]
+                            if isinstance(err, dict):
+                                err_msg = err.get("message", "Unknown error")
+                            else:
+                                err_msg = str(err)
+                        
+                        # Return 0 remaining to trigger auto-switching
+                        return {"error": f"API Error ({resp.status}): {err_msg}", "remaining": 0, "unit": "Error"}
+            except Exception as e:
+                return {"error": f"Request failed: {str(e)}", "remaining": 0, "unit": "Error"}
 
     @staticmethod
     async def _query_siliconflow(api_key: str):
