@@ -66,4 +66,3 @@
 | `/api min_balance <val>` | 设置自动切换的死链判定余额阈值 (默认 0.01) |
 
 ---
-**由 KardeniaPoyu 倾力打造，彻底治愈你的 API 额度焦虑。**
