@@ -1,32 +1,30 @@
-# 🚀 AstrBot API Manager (API 管理器)
+# 🚀 AstrBot API Manager (批量 API 模型智能调度器)
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/KardeniaPoyu/astrbot_plugin_api_manager?style=flat-square" alt="release">
   <img src="https://img.shields.io/github/license/KardeniaPoyu/astrbot_plugin_api_manager?style=flat-square" alt="license">
-  <img src="https://img.shields.io/github/stars/KardeniaPoyu/astrbot_plugin_api_manager?style=flat-square" alt="stars">
 </p>
 
-为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 打造的专业级 API 智能调度插件。它不仅是一个余额查询工具，更是一个强大的**智能负载均衡器**和**意图感知调度中心**。
+为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 打造的专业级多模型批量管理与路由插件。
+当你拥有数十个不同厂商的 API Key（有的免费、有的付费、有的擅长推理、有的额度极少），本插件能帮你**将它们全部整合、批量管理，并在额度耗尽时实现 0 延迟的全自动无缝切换**。
+
+告别“发消息报错 -> 手动查余额 -> 手动切模型”的繁琐流程，让机器人进入自动驾驶模式。
 
 ---
 
-## 🌟 核心特性
+## 🌟 核心优势 (Why Choose This?)
 
-### 1. 🛰️ 多渠道状态感知 (Health Check)
-- **多平台支持**：深度适配 DeepSeek, SiliconFlow, Moonshot (Kimi), 阿里云(DashScope/百炼), OneAPI/NewAPI 等。
-- **智能探测**：支持阿里云等无余额接口平台的**特定模型可用性探测**（模拟 1-token 生成），确保 Key 和模型均处于可用状态。
+### 1. 📦 批量管理：你的模型 API 中枢
+- **大一统可视化管理**：一键执行 `/api list`，即可像看板一样，清晰看到你所有 API Key 的剩余额度、探针健康状态、以及每个模型成功接客的“路由次数”。
+- **兼容所有主流平台**：深度打通 DeepSeek, SiliconFlow, Moonshot (Kimi), OneAPI/NewAPI，更**特别支持了阿里云 (DashScope)** 的单模型细粒度状态探测。
 
-### 2. 🧠 智能意图识别 (Auto-Scene Switching)
-- **场景自动驾驶**：通过关键词和内容长度识别，自动在 `daily` (日常闲聊) 和 `reasoning` (复杂推理/编程) 路由组之间**无缝切换**。
-- **零配置体验**：只需命名对应的路由组，插件即可自动接管决策。
+### 2. ⚡ 死链秒切：全自动故障容灾 (Auto Failover)
+- **额度耗尽？自动抛弃**：插件会在你聊天时精准拦截 403 (免费额度用完) 或余额不足报错。
+- **无缝接力调度**：一旦发现当前 API 没钱了，插件会在 1 毫秒内自动顺延，将消息发送给你配置好的“备用模型”，并调用 AstrBot 底层接口**正式切换会话模型**，过程丝滑无感。
 
-### 3. 🛡️ 自动故障迁移与负载均衡 (Failover)
-- **优先级路由**：组内模型按需排序，优先使用免费/廉价资源，自动兜底昂贵模型。
-- **正式状态同步**：当发生切换时，自动调用 AstrBot 原生 `set_provider` 接口，确保会话状态在系统层级持久化。
-
-### 4. 📊 可视化仪表盘 (Dashboard)
-- **仿原生 UI**：`/api list` 采用与 `/provider` 一致的排版风格，带有 `👈 (当前)` 指示器。
-- **使用量统计**：实时追踪每个 API 的成功路由次数，一眼看出哪个 Key 贡献最大。
+### 3. 🧠 意图感知识别：日常与推理自动分离
+- **聊天用免费，算题用付费**：如果你同时配置了 `daily` 和 `reasoning` 组，插件会在收到消息时自动进行“意图判定”。
+- **全自动场景切换**：遇到“代码、报错、推导”等复杂关键词或长文本，它会自动唤醒强大的推理模型（如 DeepSeek-R1）；遇到日常打招呼，自动切回廉价模型（如 Qwen-Turbo），帮你把好钢用在刀刃上。
 
 ---
 
@@ -36,22 +34,22 @@
 在 AstrBot WebUI 的“插件”页面，点击“安装插件”，输入本仓库地址：
 `https://github.com/KardeniaPoyu/astrbot_plugin_api_manager`
 
-### 基础配置指南 (推荐)
+### 极简配置流：构建你的“模型防波堤”
 
-1. **设置查询类型**（插件会自动尝试识别，但手动设置更精准）：
+1. **配置你的“日常防波堤” (daily)**
+   *把白嫖的、不稳定的 API 放前面，稳定付费的放后面兜底*
    ```text
-   /api set_type <provider_id> aliyun
+   /api group set daily aliyun_turbo sf_free qwen_paid
    ```
-2. **配置自动驾驶路由组**：
+
+2. **配置你的“最强大脑” (reasoning)**
+   *便宜的推理模型放前面，昂贵的放后面*
    ```text
-   # 配置日常组（优先白嫖，不行就付钱）
-   /api group set daily siliconflow_free qwen_plus
-   
-   # 配置推理组（专门用于写代码和解决难题）
    /api group set reasoning deepseek_r1 kimi_k2.6
    ```
-3. **享受自动调度**：
-   现在你可以直接开始聊天了。插件会自动检测你的提问难度并为你挑选最合适的模型。
+
+3. **享受自动驾驶**
+   现在开始聊天即可！遇到难题它会自动切到 reasoning，其中某个 API 没额度了它会自动切到下一个。
 
 ---
 
@@ -59,18 +57,13 @@
 
 | 指令 | 说明 |
 | :--- | :--- |
-| `/api list` | 以原生风格列出所有提供商 ID、模型、状态及路由次数 |
-| `/api balance [id]` | 查询并刷新所有或特定提供商的余额/可用性缓存 |
-| `/api set_type <id> <type>` | 设置探针类型 (deepseek, siliconflow, aliyun, oneapi, etc.) |
+| `/api list` | **[核心]** 以原生风格列出所有模型的：ID、真实模型名、余额状态及路由次数 |
+| `/api group set <name> <ids...>` | **[核心]** 批量设置组内成员，排序即代表**切换优先级**（排前面的优先用） |
+| `/api balance [id]` | 手动批量触发余额/健康度查询探针 |
+| `/api set_type <id> <type>` | 强制设置探针类型 (deepseek, siliconflow, aliyun, oneapi, etc.) |
 | `/api group list` | 查看当前所有路由组配置 |
-| `/api group set <name> <ids...>` | **[推荐]** 显式设置组内成员及其优先级顺序 |
-| `/api group use <name>` | 手动强制切换当前激活的路由组 |
-| `/api min_balance <val>` | 设置自动切换的余额阈值 (默认 0.01) |
+| `/api group use <name>` | 强制覆盖自动路由，手动切换当前激活的场景组 |
+| `/api min_balance <val>` | 设置自动切换的死链判定余额阈值 (默认 0.01) |
 
 ---
-
-## 📄 开源协议
-[MIT License](LICENSE)
-
----
-**由 KardeniaPoyu 倾力打造，让 AI 接入更简单、更智能。**
+**由 KardeniaPoyu 倾力打造，彻底治愈你的 API 额度焦虑。**
