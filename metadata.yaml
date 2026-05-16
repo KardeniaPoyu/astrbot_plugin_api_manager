@@ -1,25 +1,10 @@
-name: astrbot_plugin_api_mgr
-display_name: API 管理器
-desc: 管理模型提供商、API Key、负载均衡及自动容错，支持额度查询。
-short_desc: 模型提供商与 API 管理器
+name: astrbot_plugin_api_manager
+display_name: API Manager | 模型智能调度管理器
+desc: 为 AstrBot 打造的专业级 API 管理插件。支持多渠道余额查询、智能意图识别场景切换、自动负载均衡与故障迁移、使用量统计及实时状态看板。
+short_desc: 专业级模型提供商与 API 智能调度管理器
 author: KardeniaPoyu
-version: 1.0.0
-repo: https://github.com/KardeniaPoyu/astrbot_plugin_api_mgr
-priority: 100
+version: v1.1.0
+repo: https://github.com/KardeniaPoyu/astrbot_plugin_api_manager
+priority: 1000
 support_platforms:
-  - aiocqhttp
-  - qq_official
-  - telegram
-  - discord
-  - wecom
-  - lark
-  - dingtalk
-  - satori
-  - kook
-  - vocechat
-  - weixin_official_account
-  - satori
-  - misskey
-  - line
-  - matrix
-  - mattermost
+  - all

@@ -6,7 +6,7 @@ from .api_service import ApiService
 
 logger = logging.getLogger("astrbot.api_mgr")
 
-@register("api_mgr", "KardeniaPoyu", "管理模型提供商及 API Key，自动根据 API 情况调整模型，显示剩余额度。", "1.0.0", "https://github.com/KardeniaPoyu/astrbot_plugin_api_mgr")
+@register("api_mgr", "KardeniaPoyu", "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。", "1.1.0", "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager")
 class ApiMgrPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
