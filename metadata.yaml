@@ -7,4 +7,19 @@ version: v1.1.0
 repo: https://github.com/KardeniaPoyu/astrbot_plugin_api_manager
 priority: 1000
 support_platforms:
-  - all
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - discord
+  - wecom
+  - lark
+  - dingtalk
+  - satori
+  - kook
+  - vocechat
+  - weixin_official_account
+  - satori
+  - misskey
+  - line
+  - matrix
+  - mattermost
