@@ -10,6 +10,12 @@ class ApiService:
         Query balance for different providers.
         Returns a dict with 'total', 'used', 'remaining' and 'unit'.
         """
+    @staticmethod
+    async def get_balance(provider_type: str, api_key: str, base_url: str = None) -> dict:
+        """
+        Query balance for different providers.
+        Returns a dict with 'total', 'used', 'remaining' and 'unit'.
+        """
         try:
             if provider_type == "deepseek":
                 return await ApiService._query_deepseek(api_key)
@@ -20,10 +26,9 @@ class ApiService:
             elif provider_type == "oneapi":
                 return await ApiService._query_oneapi(api_key, base_url)
             else:
-                # Try generic OpenAI-compatible balance if possible (rarely standard)
                 return {"error": f"Unsupported provider type: {provider_type}"}
         except Exception as e:
-            logger.error(f"Error querying balance for {provider_type}: {e}")
+            logger.error(f"Error querying balance for {provider_type}: {e}", exc_info=True)
             return {"error": str(e)}
 
     @staticmethod
@@ -32,16 +37,31 @@ class ApiService:
         headers = {"Authorization": f"Bearer {api_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                data = await resp.json()
-                if resp.status == 200 and data.get("is_available"):
-                    balance_info = data.get("balance_infos", [{}])[0]
-                    return {
-                        "total": float(balance_info.get("total_balance", 0)),
-                        "used": 0, # DeepSeek doesn't show used in this endpoint
-                        "remaining": float(balance_info.get("total_balance", 0)),
-                        "unit": balance_info.get("currency", "CNY")
-                    }
-                return {"error": data.get("error", "Unknown error")}
+                try:
+                    data = await resp.json()
+                except:
+                    data = {"error": await resp.text()}
+                
+                if not isinstance(data, dict):
+                    data = {"error": str(data)}
+
+                if resp.status == 200:
+                    if data.get("is_available"):
+                        balance_info = data.get("balance_infos", [{}])[0]
+                        return {
+                            "total": float(balance_info.get("total_balance", 0)),
+                            "used": 0,
+                            "remaining": float(balance_info.get("total_balance", 0)),
+                            "unit": balance_info.get("currency", "CNY")
+                        }
+                    else:
+                        return {"error": "DeepSeek account not available or balance zero."}
+                
+                # Handle error dict
+                err = data.get("error", {})
+                if isinstance(err, dict):
+                    return {"error": err.get("message", "Unknown error")}
+                return {"error": str(err) or "Unknown error"}
 
     @staticmethod
     async def _query_siliconflow(api_key: str):
@@ -49,8 +69,15 @@ class ApiService:
         headers = {"Authorization": f"Bearer {api_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                data = await resp.json()
-                if resp.status == 200 and data.get("status"):
+                try:
+                    data = await resp.json()
+                except:
+                    data = {"error": await resp.text()}
+
+                if not isinstance(data, dict):
+                    data = {"error": str(data)}
+
+                if resp.status == 200 and (data.get("status") is True or data.get("code") == 20000):
                     data = data.get("data", {})
                     return {
                         "total": float(data.get("totalBalance", 0)),
@@ -58,7 +85,7 @@ class ApiService:
                         "remaining": float(data.get("balance", 0)),
                         "unit": "CNY"
                     }
-                return {"error": data.get("message", "Unknown error")}
+                return {"error": data.get("message", data.get("error", "Unknown error"))}
 
     @staticmethod
     async def _query_moonshot(api_key: str):
@@ -66,29 +93,50 @@ class ApiService:
         headers = {"Authorization": f"Bearer {api_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                data = await resp.json()
+                try:
+                    data = await resp.json()
+                except:
+                    data = {"error": await resp.text()}
+
+                if not isinstance(data, dict):
+                    data = {"error": str(data)}
+
                 if resp.status == 200:
                     return {
-                        "total": float(data.get("available_balance", 0)), # Simplified
+                        "total": float(data.get("available_balance", 0)),
                         "used": 0,
                         "remaining": float(data.get("available_balance", 0)),
                         "unit": "CNY"
                     }
-                return {"error": data.get("error", "Unknown error")}
+                
+                err = data.get("error", {})
+                if isinstance(err, dict):
+                    return {"error": err.get("message", "Unknown error")}
+                return {"error": str(err) or "Unknown error"}
 
     @staticmethod
     async def _query_oneapi(api_key: str, base_url: str):
         if not base_url:
             return {"error": "Base URL required for OneAPI"}
-        # OneAPI usually has /api/user/info for the dashboard, but for API keys it might differ.
-        # Often people use /v1/user/info for some OpenAI compatibles.
-        url = f"{base_url.rstrip('/')}/api/user/info" 
+        
+        # Strip /v1 if present for API calls
+        base_url = base_url.rstrip('/')
+        if base_url.endswith('/v1'):
+            base_url = base_url[:-3]
+            
+        url = f"{base_url}/api/user/info" 
         headers = {"Authorization": f"Bearer {api_key}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
+                try:
                     data = await resp.json()
+                except:
+                    data = {"error": await resp.text()}
+
+                if resp.status == 200 and isinstance(data, dict):
                     user_data = data.get("data", {})
+                    if not isinstance(user_data, dict):
+                        return {"error": "Unexpected data format from OneAPI"}
                     # OneAPI balance is usually in 'quota', 1 USD = 500000 quota by default
                     quota = user_data.get("quota", 0)
                     return {
@@ -97,4 +145,24 @@ class ApiService:
                         "remaining": quota,
                         "unit": "Quota"
                     }
-                return {"error": f"HTTP {resp.status}"}
+                
+                # Try v1/user/info as fallback (NewAPI/some OneAPI versions)
+                v1_url = f"{base_url}/v1/user/info"
+                async with session.get(v1_url, headers=headers) as resp2:
+                    if resp2.status == 200:
+                        try:
+                            data = await resp2.json()
+                        except:
+                            data = {}
+                        
+                        if not isinstance(data, dict): data = {}
+
+                        # Some return quota directly in data
+                        if "quota" in data:
+                            return {"total": data["quota"], "used": 0, "remaining": data["quota"], "unit": "Quota"}
+                        if "data" in data and isinstance(data["data"], dict) and "quota" in data["data"]:
+                            return {"total": data["data"]["quota"], "used": 0, "remaining": data["data"]["quota"], "unit": "Quota"}
+                
+                return {"error": f"Failed to query OneAPI (HTTP {resp.status})"}
+
+

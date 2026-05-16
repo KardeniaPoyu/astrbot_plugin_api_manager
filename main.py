@@ -27,8 +27,11 @@ class ApiMgrPlugin(Star):
         if p_id in self.provider_types:
             return self.provider_types[p_id]
         
+        # Access nested config if present
+        config = p.provider_config.get("config", {})
+        base_url = (p.provider_config.get("base_url") or config.get("base_url") or "").lower()
+        
         # Auto-detection
-        base_url = p.provider_config.get("base_url", "").lower()
         if "deepseek" in p_id or "deepseek" in base_url:
             return "deepseek"
         if "siliconflow" in p_id or "siliconflow" in base_url:
@@ -136,9 +139,14 @@ class ApiMgrPlugin(Star):
             p_type = self._get_provider_type(p)
             if p_type == "none": continue
             
-            api_key = p.provider_config.get("api_key")
-            base_url = p.provider_config.get("base_url")
+            config = p.provider_config.get("config", {})
+            api_key = p.provider_config.get("api_key") or config.get("api_key")
+            base_url = p.provider_config.get("base_url") or config.get("base_url")
             
+            if not api_key:
+                results.append(f"❌ {p_id}: 未找到 API Key")
+                continue
+                
             balance = await ApiService.get_balance(p_type, api_key, base_url)
             if "error" in balance:
                 results.append(f"❌ {p_id}: 查询失败 ({balance['error']})")
