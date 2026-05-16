@@ -235,15 +235,33 @@ class ApiMgrPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
         """拦截消息并应用路由策略"""
-        if self.active_group == "default" and not self.groups.get("default"):
-            return
-
-        group_providers = self.groups.get(self.active_group, [])
-        if not group_providers:
-            return
-
         if event.message_str.startswith("/api"):
             return
+            
+        # ---------- 自动场景切换 (Auto Scene Routing) ----------
+        msg_text = event.message_str
+        group_name = self.active_group
+        scene_switch_reason = None
+        
+        # 仅当用户同时配置了 'daily' 和 'reasoning' 组时启用智能切换
+        if "daily" in self.groups and "reasoning" in self.groups:
+            reasoning_keywords = ["代码", "编程", "脚本", "推导", "分析", "写一个", "实现", "算法", "bug", "报错", "为什么", "code", "python", "javascript", "java", "c++", "数学", "逻辑"]
+            
+            # 简单启发式：包含关键词，或者内容较长，归为需要推理
+            if any(k in msg_text.lower() for k in reasoning_keywords) or len(msg_text) >= 150:
+                group_name = "reasoning"
+                if self.active_group != "reasoning":
+                    scene_switch_reason = "检测到复杂任务/代码/长文本"
+            else:
+                group_name = "daily"
+                if self.active_group != "daily":
+                    scene_switch_reason = "检测到日常闲聊"
+        # -------------------------------------------------------
+
+        if group_name not in self.groups or not self.groups[group_name]:
+            return
+
+        group_providers = self.groups[group_name]
 
         # 动态选择：在组内寻找余额充足的第一个提供商
         selected_provider_id = None
@@ -276,7 +294,12 @@ class ApiMgrPlugin(Star):
                     provider_type=ProviderType.CHAT_COMPLETION,
                     umo=event.unified_msg_origin
                 )
-                yield event.plain_result(f"♻️ [API 自动路由] 当前提供商 ({current_provider.meta().id}) 额度不足或不可用，已自动为您无缝切换至备用提供商: {selected_provider_id}")
+                
+                # 根据触发条件动态给出友好的自动切换提示
+                if scene_switch_reason:
+                    yield event.plain_result(f"🧠 [智能场景切换] {scene_switch_reason}，已自动为您分配最合适的模型组 ({group_name}): {selected_provider_id}")
+                else:
+                    yield event.plain_result(f"♻️ [API 自动路由] 当前提供商 ({current_provider.meta().id}) 额度不足或不可用，已自动为您无缝切换至备用提供商: {selected_provider_id}")
             except Exception as e:
                 logger.error(f"API Manager: Failed to set provider via ProviderManager: {e}")
         
