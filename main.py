@@ -15,7 +15,7 @@ QUOTA_ERROR_PATTERNS = [
     "RateLimitError", "AuthenticationError",
 ]
 
-@register("api_mgr", "KardeniaPoyu", "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。", "1.2.1", "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager")
+@register("api_mgr", "KardeniaPoyu", "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。", "1.2.2", "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager")
 class ApiMgrPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)

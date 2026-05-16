@@ -3,7 +3,7 @@ display_name: API Manager | 模型智能调度管理器
 desc: 为 AstrBot 打造的专业级 API 管理插件。支持多渠道余额查询、智能意图识别场景切换、自动负载均衡与故障迁移、使用量统计及实时状态看板。
 short_desc: 专业级模型提供商与 API 智能调度管理器
 author: KardeniaPoyu
-version: v1.1.0
+version: v1.2.2
 repo: https://github.com/KardeniaPoyu/astrbot_plugin_api_manager
 priority: 1000
 support_platforms:
