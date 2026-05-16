@@ -36,23 +36,43 @@ class ApiMgrPlugin(Star):
         self.usage_cache = await self.get_kv_data("usage_cache", {})
 
     def _get_provider_type(self, p) -> str:
-        p_id = p.provider_config.get("id", "").lower()
+        # Manual override always takes priority
+        p_id = p.provider_config.get("id", "")
         if p_id in self.provider_types:
             return self.provider_types[p_id]
 
         config = p.provider_config.get("config", {})
         base_url = (p.provider_config.get("base_url") or config.get("base_url") or "").lower()
 
-        if "deepseek" in p_id or "deepseek" in base_url:
+        # 1. base_url is the most reliable signal — check it first
+        if "deepseek.com" in base_url:
             return "deepseek"
-        if "siliconflow" in p_id or "siliconflow" in base_url:
+        if "siliconflow" in base_url:
             return "siliconflow"
-        if "moonshot" in p_id or "kimi" in p_id or "moonshot" in base_url:
+        if "moonshot" in base_url:
             return "moonshot"
-        if "oneapi" in p_id or "newapi" in p_id:
-            return "oneapi"
-        if "aliyun" in p_id or "dashscope" in p_id or "dashscope" in base_url or "qwen" in p_id:
+        if "dashscope.aliyun" in base_url:
             return "aliyun"
+
+        # 2. Fall back to checking the provider NAME only (the part before '/',
+        #    e.g. "openai/deepseek-v3.2-exp" → provider_name = "openai")
+        #    This avoids misidentifying "openai/deepseek-xxx" as deepseek provider.
+        provider_name = p_id.split("/")[0].lower()
+        if provider_name == "deepseek":
+            return "deepseek"
+        if provider_name in ("siliconflow",):
+            return "siliconflow"
+        if provider_name in ("moonshot", "kimi"):
+            return "moonshot"
+        if provider_name in ("oneapi", "newapi"):
+            return "oneapi"
+        if provider_name in ("aliyun", "dashscope", "qwen"):
+            return "aliyun"
+
+        # 3. If base_url contains hints for oneapi-style deployments
+        if base_url and any(k in base_url for k in ["oneapi", "newapi"]):
+            return "oneapi"
+
         return "none"
 
     def _is_balance_sufficient(self, p_id: str) -> bool:
