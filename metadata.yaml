@@ -3,7 +3,7 @@ display_name: API 管家
 desc: 全自动 API 及模型管理。支持余额查询、根据使用场景智能调度。额度耗尽时，能秒级自动跳过并切换到备用模型。
 short_desc: 批量管理 API，智能调度与自动切换
 author: KardeniaPoyu
-version: v1.2.2
+version: v1.3.0
 repo: https://github.com/KardeniaPoyu/astrbot_plugin_api_manager
 priority: 1000
 support_platforms:

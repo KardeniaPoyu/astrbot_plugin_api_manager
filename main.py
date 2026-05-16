@@ -15,7 +15,7 @@ QUOTA_ERROR_PATTERNS = [
     "RateLimitError", "AuthenticationError",
 ]
 
-@register("api_mgr", "KardeniaPoyu", "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。", "1.2.2", "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager")
+@register("api_mgr", "KardeniaPoyu", "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。", "1.3.0", "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager")
 class ApiMgrPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -240,6 +240,73 @@ class ApiMgrPlugin(Star):
 
         await self.put_kv_data("balance_cache", self.balance_cache)
         yield event.plain_result("\n".join(results))
+
+    @api_group.command("batch_add")
+    async def batch_add_providers(self, event: AstrMessageEvent, prefix: str, base_url: str, api_key: str, models_str: str):
+        """
+        批量添加兼容 OpenAI 格式的模型提供商。
+        参数:
+        - prefix: 提供商标识前缀 (例如: deepseek)
+        - base_url: API 接口地址 (例如: https://api.deepseek.com/v1)
+        - api_key: 你的 API Key
+        - models_str: 逗号分隔的模型名列表 (例如: deepseek-chat,deepseek-reasoner)
+        
+        示例: /api batch_add ds https://api.deepseek.com/v1 sk-xxxx ds-chat,ds-coder
+        """
+        models = [m.strip() for m in models_str.split(",") if m.strip()]
+        if not models:
+            yield event.plain_result("错误：请至少提供一个模型名（使用逗号分隔）。")
+            return
+            
+        from astrbot.core import astrbot_config
+        
+        added_count = 0
+        added_ids = []
+        
+        for model in models:
+            provider_id = f"{prefix}/{model}"
+            
+            # Check if already exists
+            if any(p.get("id") == provider_id for p in astrbot_config["provider"]):
+                continue
+                
+            new_provider = {
+                "id": provider_id,
+                "type": "openai_chat_completion",
+                "enable": True,
+                "key": [api_key],
+                "config": {
+                    "base_url": base_url,
+                    "api_key": api_key,  # For redundancy
+                    "model": model,
+                    "proxy": ""
+                }
+            }
+            
+            astrbot_config["provider"].append(new_provider)
+            added_count += 1
+            added_ids.append(provider_id)
+            
+            # Hot reload into ProviderManager
+            try:
+                await self.context.provider_manager.reload(new_provider)
+            except Exception as e:
+                logger.error(f"API Manager: Failed to hot reload provider {provider_id}: {e}")
+                
+        if added_count == 0:
+            yield event.plain_result("没有添加任何新的模型（可能 ID 已存在）。")
+            return
+            
+        # Persist the changes to config.yml
+        try:
+            # In AstrBot v4, self.context.config_manager.default_conf is the global AstrBotConfig
+            self.context.config_manager.default_conf.save_config()
+        except Exception as e:
+            logger.error(f"API Manager: Failed to save config.yml: {e}")
+            yield event.plain_result(f"✅ 成功热加载了 {added_count} 个模型，但保存到配置文件失败，重启后可能失效。")
+            return
+            
+        yield event.plain_result(f"✅ 成功批量添加了 {added_count} 个模型：\n{', '.join(added_ids)}\n使用 /api list 可查看当前状态。")
 
     @api_group.command("group")
     async def manage_groups(self, event: AstrMessageEvent, action: str, group_name: str = None, *provider_ids: str):
