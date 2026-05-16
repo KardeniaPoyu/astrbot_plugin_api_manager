@@ -207,7 +207,13 @@ class ApiMgrPlugin(Star):
                 if p_id not in self.groups[group_name]:
                     self.groups[group_name].append(p_id)
             await self.put_kv_data("groups", self.groups)
-            yield event.plain_result(f"已将 {', '.join(provider_ids)} 添加到组 {group_name}")
+            yield event.plain_result(f"已将 {', '.join(provider_ids)} 追加到组 {group_name}")
+            
+        elif action == "set":
+            # 覆盖写入，用于精确设置优先级（排在前面的优先级高）
+            self.groups[group_name] = list(provider_ids)
+            await self.put_kv_data("groups", self.groups)
+            yield event.plain_result(f"已重置组 {group_name}，当前优先级排序为: {', '.join(provider_ids)}")
         
         elif action == "remove":
             if group_name in self.groups:
