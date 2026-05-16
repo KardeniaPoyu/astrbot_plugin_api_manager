@@ -187,12 +187,26 @@ class ApiMgrPlugin(Star):
                 continue
 
             config = p.provider_config.get("config", {})
-            api_key = p.provider_config.get("api_key") or config.get("api_key")
+            
+            # AstrBot stores API keys in provider_config['key'] as a list.
+            # Use get_current_key() if available, otherwise fall back to the list.
+            api_key = None
+            try:
+                api_key = p.get_current_key()
+            except Exception:
+                pass
+            if not api_key:
+                keys = p.provider_config.get("key") or config.get("key") or []
+                if isinstance(keys, list) and keys:
+                    api_key = keys[0]
+                elif isinstance(keys, str) and keys:
+                    api_key = keys
+
             base_url = p.provider_config.get("base_url") or config.get("base_url")
             model_name = config.get("model") or p.provider_config.get("model")
 
             if not api_key:
-                results.append(f"❌ {p_id}: 未找到 API Key")
+                results.append(f"❌ {p_id}: 未找到 API Key（请确认 AstrBot 中该提供商已配置 Key）")
                 continue
 
             balance = await ApiService.get_balance(p_type, api_key, base_url, model_name)
