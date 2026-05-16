@@ -1,11 +1,11 @@
-# 🚀 AstrBot API Manager (批量 API 模型智能调度器)
+# 🚀 AstrBot API Manager ( API 管家)
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/KardeniaPoyu/astrbot_plugin_api_manager?style=flat-square" alt="release">
   <img src="https://img.shields.io/github/license/KardeniaPoyu/astrbot_plugin_api_manager?style=flat-square" alt="license">
 </p>
 
-为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 打造的专业级多模型批量管理与路由插件。
+为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 打造的批量 API 全自动管理和切换插件。
 当你拥有数十个不同厂商的 API Key（有的免费、有的付费、有的擅长推理、有的额度极少），或者一个拥有上百个模型的 API Key 时，本插件能帮你**将它们全部整合、批量管理，并在额度耗尽时实现 0 延迟的全自动无缝切换**。
 
 告别“发消息报错 -> 手动查余额 -> 手动切模型”的繁琐流程，让机器人进入自动驾驶模式。
