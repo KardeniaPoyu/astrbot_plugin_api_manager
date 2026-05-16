@@ -232,6 +232,63 @@ class ApiMgrPlugin(Star):
                 await self.put_kv_data("active_group", self.active_group)
                 yield event.plain_result(f"已删除组 {group_name}")
 
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, request: "ProviderRequest"):
+        """在请求前劫持 Provider，实现运行时错误自动学习"""
+        provider = self.context.get_using_provider(umo=event.unified_msg_origin)
+        if not provider:
+            return
+        
+        p_id = provider.provider_config.get("id")
+        if not p_id:
+            return
+
+        # 只对处于我们管理下的 Provider 进行动态监控
+        all_managed_ids = set()
+        for g in self.groups.values():
+            all_managed_ids.update(g)
+        
+        if p_id not in all_managed_ids:
+            return
+
+        # 装饰 text_chat 和 text_chat_stream 以捕获异常
+        if not hasattr(provider, "_api_mgr_wrapped"):
+            original_text_chat = provider.text_chat
+            original_text_chat_stream = provider.text_chat_stream
+
+            async def wrapped_text_chat(*args, **kwargs):
+                try:
+                    return await original_text_chat(*args, **kwargs)
+                except Exception as e:
+                    await self._handle_runtime_error(p_id, e)
+                    raise e
+
+            async def wrapped_text_chat_stream(*args, **kwargs):
+                try:
+                    async for resp in original_text_chat_stream(*args, **kwargs):
+                        yield resp
+                except Exception as e:
+                    await self._handle_runtime_error(p_id, e)
+                    raise e
+
+            provider.text_chat = wrapped_text_chat
+            provider.text_chat_stream = wrapped_text_chat_stream
+            provider._api_mgr_wrapped = True
+            logger.debug(f"API Manager: Wrapped provider {p_id} for runtime error monitoring.")
+
+    async def _handle_runtime_error(self, p_id: str, e: Exception):
+        """处理运行时捕获到的异常，更新余额缓存"""
+        err_str = str(e)
+        # 识别典型的额度耗尽、模型错误或权限错误 (400, 401, 403, 429)
+        if any(k in err_str for k in ["400", "401", "403", "429", "quota", "balance", "insufficient", "model names"]):
+            logger.warning(f"API Manager: Detected permanent/quota error for {p_id}: {err_str}")
+            self.balance_cache[p_id] = {
+                "remaining": 0, 
+                "status": f"❌ Runtime Error: {err_str[:60]}...",
+                "last_check": __import__("time").time()
+            }
+            await self.put_kv_data("balance_cache", self.balance_cache)
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
         """拦截消息并应用路由策略"""
