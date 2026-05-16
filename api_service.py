@@ -4,6 +4,10 @@ import logging
 
 logger = logging.getLogger("astrbot.api_mgr")
 
+# Global timeout for all balance query HTTP requests
+_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+
 class ApiService:
     @staticmethod
     async def get_balance(provider_type: str, api_key: str, base_url: str = None, model_name: str = None) -> dict:
