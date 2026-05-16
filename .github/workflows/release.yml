@@ -1,0 +1,32 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on tags starting with v (e.g., v1.1.0)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Plugin Archive
+        run: |
+          mkdir astrbot_plugin_api_manager
+          # Copy essential files
+          cp -r *.py metadata.yaml README.md LICENSE requirements.txt astrbot_plugin_api_manager/
+          # Create zip
+          zip -r astrbot_plugin_api_manager.zip astrbot_plugin_api_manager/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: astrbot_plugin_api_manager.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
