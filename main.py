@@ -446,7 +446,7 @@ class ApiMgrPlugin(Star):
                 return
             msg = "🔴 熔断器状态:\n"
             for p_id, s in stats.items():
-                state_icon = {"CLOSED": "🟢", "OPEN": "🔴", "HALF_OPEN": "🟡"}.get(s.state.name, "⚪")
+                state_icon = {"CLOSED": "🟢", "OPEN": "🔴", "HALF_OPEN": "🟡"}.get(s.state, "⚪")
                 msg += f"{state_icon} {p_id}: {s.state} (失败: {s.total_failures})\n"
             yield event.plain_result(msg)
 
@@ -696,6 +696,20 @@ class ApiMgrPlugin(Star):
     async def _handle_runtime_error(self, p_id: str, e: Exception):
         """捕获运行时异常并更新余额缓存以隔离问题 Provider。"""
         err_str = str(e)
+
+        # Log failed route for statistics (error rates)
+        group_name = self.active_group
+        try:
+            if group_name in self.groups and p_id in self.groups[group_name]:
+                self._stats.log_route(
+                    group_name=group_name,
+                    provider_id=p_id,
+                    scene="",
+                    success=False,
+                    error_type=type(e).__name__,
+                )
+        except Exception as stats_err:
+            logger.debug(f"API Manager: Failed to log failed route to stats: {stats_err}")
         if any(pattern in err_str for pattern in QUOTA_ERROR_PATTERNS):
             logger.warning(f"API Manager: Quota/auth error detected for '{p_id}', marking as unavailable. Error: {err_str[:120]}")
             self.balance_cache[p_id] = {

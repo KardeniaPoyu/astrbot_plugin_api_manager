@@ -18,7 +18,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=15)
 class OneAPIProbe(BaseProviderProbe):
     probe_type = "oneapi"
     display_name = "OneAPI / NewAPI"
-    url_patterns = []  # Depends on custom base_url
+    url_patterns = ["oneapi", "newapi"]  # Common substrings in custom gateway URLs
 
     async def probe(self, api_key: str, base_url: str = "", model_name: str = "") -> BalanceInfo:
         if not base_url:
