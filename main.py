@@ -1,12 +1,58 @@
+"""
+AstrBot API Manager Plugin - Enterprise Edition.
+
+Features:
+- Provider balance/health probes for 9+ platforms
+- Weighted scene detection for intelligent routing
+- Circuit breaker for fault isolation
+- SQLite-based route statistics
+- Periodic background balance checks
+- WebUI dashboard
+"""
+from __future__ import annotations
+
 import time
 import logging
+from typing import TYPE_CHECKING, Any
+
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
-from .api_service import ApiService
+
+if TYPE_CHECKING:
+    pass
+
+# ── Plugin imports ──────────────────────────────────────────────────
+
+from providers.base import BalanceInfo
+from providers.registry import ProviderRegistry, global_registry
+from providers.deepseek import DeepSeekProbe
+from providers.siliconflow import SiliconFlowProbe
+from providers.moonshot import MoonshotProbe
+from providers.oneapi import OneAPIProbe
+from providers.aliyun import AliyunProbe
+from providers.openai import OpenAIProbe
+from providers.anthropic import AnthropicProbe
+from providers.gemini import GeminiProbe
+from providers.groq import GroqProbe
+
+from router.scene_detector import SceneDetector, DetectionResult
+from router.circuit_breaker import (
+    CircuitBreakerRegistry,
+    STATE_CLOSED,
+    STATE_OPEN,
+    STATE_HALF_OPEN,
+)
+from router.balancer import RoutingBalancer, RoutingStrategy, ProviderRoute
+
+from storage.stats_store import StatsStore
+
+from monitor.periodic_check import PeriodicBalanceChecker
 
 logger = logging.getLogger("astrbot.api_mgr")
 
-# Error patterns that indicate a permanent/quota failure (not a transient network issue)
+# ── Constants ───────────────────────────────────────────────────────
+
+# Error patterns indicating permanent/quota failure
 QUOTA_ERROR_PATTERNS = [
     "400", "401", "403", "429",
     "quota", "balance", "insufficient",
@@ -15,81 +61,180 @@ QUOTA_ERROR_PATTERNS = [
     "RateLimitError", "AuthenticationError",
 ]
 
-@register("api_mgr", "KardeniaPoyu", "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。", "1.3.0", "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager")
+
+@register(
+    "api_mgr",
+    "KardeniaPoyu",
+    "专业级 API 管理插件：支持多渠道余额查询、意图识别场景自动切换、负载均衡及自动故障迁移。",
+    "1.4.0",
+    "https://github.com/KardeniaPoyu/astrbot_plugin_api_manager"
+)
 class ApiMgrPlugin(Star):
+    """AstrBot API Manager Plugin - Main entry point."""
+
     def __init__(self, context: Context):
         super().__init__(context)
+
+        # Core components
+        self._registry = ProviderRegistry()
+        self._scene_detector = SceneDetector()
+        self._cb_registry = CircuitBreakerRegistry()
+        self._balancer = RoutingBalancer(circuit_breaker_registry=self._cb_registry)
+        self._stats = StatsStore()
+        self._periodic_checker = PeriodicBalanceChecker()
+
+        # Persistent state
         self.active_group = "default"
-        self.groups = {}          # group_name -> list of provider_ids
-        self.provider_types = {}  # provider_id -> type (deepseek, siliconflow, etc.)
-        self.balance_cache = {}   # provider_id -> balance_info  (persisted)
-        self.usage_cache = {}     # provider_id -> int (persisted)
+        self.groups: dict[str, list[str]] = {}
+        self.provider_types: dict[str, str] = {}
+        self.balance_cache: dict[str, dict] = {}
+        self.usage_cache: dict[str, int] = {}
         self.min_balance = 0.01
+        self.auto_scene_enabled = True
+        self.periodic_check_interval = 3600.0
+
+    # ── Lifecycle ────────────────────────────────────────────────────
 
     async def initialize(self):
-        """Load all persistent state from KV store on startup."""
+        """Load all persistent state and start background tasks."""
+        logger.info("API Manager: Initializing...")
+
+        # Load persisted state from KV store
         self.active_group = await self.get_kv_data("active_group", "default")
         self.groups = await self.get_kv_data("groups", {"default": []})
         self.provider_types = await self.get_kv_data("provider_types", {})
-        self.balance_cache = await self.get_kv_data("balance_cache", {})  # now persisted
+        self.balance_cache = await self.get_kv_data("balance_cache", {})
         self.min_balance = await self.get_kv_data("min_balance", 0.01)
         self.usage_cache = await self.get_kv_data("usage_cache", {})
+        self.auto_scene_enabled = await self.get_kv_data("auto_scene_enabled", True)
+        self.periodic_check_interval = await self.get_kv_data("periodic_check_interval", 3600.0)
 
-    def _get_provider_type(self, p) -> str:
-        # Manual override always takes priority
+        # Register all provider probes
+        self._register_probes()
+
+        # Apply manual overrides
+        for p_id, p_type in self.provider_types.items():
+            self._registry.set_override(p_id, p_type)
+
+        # Start periodic balance checker (if interval > 0)
+        if self.periodic_check_interval > 0:
+            await self._start_periodic_checker()
+
+        logger.info(
+            f"API Manager: Ready. "
+            f"Groups: {list(self.groups.keys())}, "
+            f"Active: {self.active_group}, "
+            f"Probes: {self._registry.probe_count}"
+        )
+
+    def _register_probes(self):
+        """Register all built-in provider probes."""
+        self._registry.register_many([
+            DeepSeekProbe(),
+            SiliconFlowProbe(),
+            MoonshotProbe(),
+            OneAPIProbe(),
+            AliyunProbe(),
+            OpenAIProbe(),
+            AnthropicProbe(),
+            GeminiProbe(),
+            GroqProbe(),
+        ])
+        logger.info(f"API Manager: Registered {self._registry.probe_count} provider probes")
+
+    async def _start_periodic_checker(self):
+        """Start the periodic balance checker."""
+        providers = self._get_provider_configs()
+        if not providers:
+            logger.info("API Manager: No providers to monitor, skipping periodic checker")
+            return
+
+        async def on_result(p_id: str, info: dict):
+            self.balance_cache[p_id] = info
+            try:
+                await self.put_kv_data("balance_cache", self.balance_cache)
+            except Exception as e:
+                logger.warning(f"API Manager: Failed to persist balance_cache: {e}")
+
+        self._periodic_checker._on_result = on_result
+        await self._periodic_checker.start(
+            probe_fn=self._probe_provider,
+            providers=providers,
+        )
+        self._periodic_checker._interval = self.periodic_check_interval
+
+    def _get_provider_configs(self) -> list[dict]:
+        """Extract provider configs from AstrBot's provider manager."""
+        providers = []
+        try:
+            for p in self.context.get_all_providers():
+                cfg = p.provider_config
+                p_id = cfg.get("id", "")
+                config = cfg.get("config", {})
+                api_key = None
+
+                try:
+                    api_key = p.get_current_key()
+                except Exception:
+                    pass
+
+                if not api_key:
+                    keys = cfg.get("key") or config.get("key") or []
+                    if isinstance(keys, list) and keys:
+                        api_key = keys[0]
+                    elif isinstance(keys, str):
+                        api_key = keys
+
+                base_url = cfg.get("base_url") or config.get("base_url") or ""
+                model_name = config.get("model") or cfg.get("model") or ""
+
+                providers.append({
+                    "id": p_id,
+                    "type": self._registry.detect_probe_type(p_id, base_url),
+                    "api_key": api_key or "",
+                    "base_url": base_url,
+                    "model": model_name,
+                })
+        except Exception as e:
+            logger.error(f"API Manager: Failed to get provider configs: {e}")
+
+        return providers
+
+    async def _probe_provider(
+        self,
+        probe_type: str,
+        api_key: str,
+        base_url: str = "",
+        model_name: str = "",
+    ) -> BalanceInfo:
+        """Probe a provider's balance/health."""
+        return await self._registry.probe(probe_type, api_key, base_url, model_name)
+
+    # ── Utility ───────────────────────────────────────────────────────
+
+    def _is_balance_sufficient(self, p_id: str) -> bool:
+        """Check if a provider has sufficient balance."""
+        if p_id not in self.balance_cache:
+            return True  # No data = optimistically allow
+        info = self.balance_cache[p_id]
+        if info.get("error"):
+            return False
+        try:
+            rem = float(info.get("remaining", 0))
+            return rem >= self.min_balance
+        except (TypeError, ValueError):
+            return True
+
+    def _get_provider_display_type(self, p) -> str:
+        """Get the display type for a provider."""
         p_id = p.provider_config.get("id", "")
         if p_id in self.provider_types:
             return self.provider_types[p_id]
-
         config = p.provider_config.get("config", {})
-        base_url = (p.provider_config.get("base_url") or config.get("base_url") or "").lower()
+        base_url = (p.provider_config.get("base_url") or config.get("base_url") or "")
+        return self._registry.detect_probe_type(p_id, base_url)
 
-        # 1. base_url is the most reliable signal — check it first
-        if "deepseek.com" in base_url:
-            return "deepseek"
-        if "siliconflow" in base_url:
-            return "siliconflow"
-        if "moonshot" in base_url:
-            return "moonshot"
-        if "dashscope.aliyun" in base_url:
-            return "aliyun"
-
-        # 2. Fall back to checking the provider NAME only (the part before '/',
-        #    e.g. "openai/deepseek-v3.2-exp" → provider_name = "openai")
-        #    This avoids misidentifying "openai/deepseek-xxx" as deepseek provider.
-        provider_name = p_id.split("/")[0].lower()
-        if provider_name == "deepseek":
-            return "deepseek"
-        if provider_name in ("siliconflow",):
-            return "siliconflow"
-        if provider_name in ("moonshot", "kimi"):
-            return "moonshot"
-        if provider_name in ("oneapi", "newapi"):
-            return "oneapi"
-        if provider_name in ("aliyun", "dashscope", "qwen"):
-            return "aliyun"
-
-        # 3. If base_url contains hints for oneapi-style deployments
-        if base_url and any(k in base_url for k in ["oneapi", "newapi"]):
-            return "oneapi"
-
-        return "none"
-
-    def _is_balance_sufficient(self, p_id: str) -> bool:
-        """Check if a provider has sufficient balance. Returns True if unknown (no cache)."""
-        if p_id not in self.balance_cache:
-            return True  # no data => optimistically allow
-        rem = self.balance_cache[p_id].get("remaining")
-        if rem is None:
-            return True  # missing field => optimistically allow
-        try:
-            return float(rem) >= self.min_balance
-        except (TypeError, ValueError):
-            return True  # non-numeric => optimistically allow
-
-    # ─────────────────────────────────────────────────────────────────
-    #  Commands
-    # ─────────────────────────────────────────────────────────────────
+    # ── Commands ──────────────────────────────────────────────────────
 
     @filter.command_group("api")
     def api_group(self):
@@ -108,23 +253,40 @@ class ApiMgrPlugin(Star):
         except Exception:
             provider_using = None
 
-        msg = "当前已配置的提供商状态:\n"
+        # Get circuit breaker stats
+        cb_stats = self._cb_registry.get_all()
+
+        msg = f"📋 当前已配置的提供商状态 (共 {len(providers)} 个):\n"
+        msg += "─" * 40 + "\n"
+
         for i, p in enumerate(providers):
             p_id = p.provider_config.get("id", "Unknown")
             config = p.provider_config.get("config", {})
             model = config.get("model") or p.provider_config.get("model", "未知")
-            detected_type = self._get_provider_type(p)
+            detected_type = self._get_provider_display_type(p)
 
+            # Balance info
             balance_str = ""
             if p_id in self.balance_cache:
                 b = self.balance_cache[p_id]
                 if b.get("error"):
-                    balance_str = f" | 余额状态: ❌ {b['error']}"
+                    balance_str = f" | ❌ {b['error'][:30]}"
                 else:
-                    balance_str = f" | 余额状态: {b.get('remaining', '?')} {b.get('unit', '')}"
+                    balance_str = f" | 💰 {b.get('remaining', '?')} {b.get('unit', '')}"
 
+            # Usage count
             usage = self.usage_cache.get(p_id, 0)
 
+            # Circuit breaker state
+            cb = cb_stats.get(p_id)
+            cb_str = ""
+            if cb:
+                if cb.state == "OPEN":
+                    cb_str = " | 🔴 熔断"
+                elif cb.state == "HALF_OPEN":
+                    cb_str = " | 🟡 探测中"
+
+            # Active marker
             active_mark = ""
             try:
                 if provider_using and provider_using.meta().id == p_id:
@@ -132,42 +294,14 @@ class ApiMgrPlugin(Star):
             except Exception:
                 pass
 
-            msg += f"{i+1}. {p_id} ({model}){active_mark}\n   ↳ 探针类型: {detected_type}{balance_str} | 成功路由次数: {usage}\n"
+            msg += f"{i+1}. **{p_id}** ({model}){active_mark}\n"
+            msg += f"   ↳ 探针: `{detected_type}`{balance_str} | 路由: {usage}次{cb_str}\n"
+
+        msg += "─" * 40 + "\n"
+        msg += f"当前激活组: **{self.active_group}**\n"
+        msg += "使用 `/api group list` 查看路由组配置"
 
         yield event.plain_result(msg)
-
-    @api_group.command("set_type")
-    async def set_provider_type(self, event: AstrMessageEvent, provider_id: str, provider_type: str):
-        """设置提供商的余额查询类型 (deepseek, siliconflow, moonshot, oneapi, aliyun, none, auto)"""
-        valid_types = ["deepseek", "siliconflow", "moonshot", "oneapi", "aliyun", "none", "auto"]
-        provider_type = provider_type.lower()
-        if provider_type not in valid_types:
-            yield event.plain_result(f"无效的类型。支持: {', '.join(valid_types)}")
-            return
-
-        providers = list(self.context.get_all_providers())
-        if provider_id.isdigit():
-            idx = int(provider_id) - 1
-            if 0 <= idx < len(providers):
-                provider_id = providers[idx].provider_config.get("id", provider_id)
-            else:
-                yield event.plain_result(f"序号 {provider_id} 超出范围。")
-                return
-
-        if provider_type == "auto":
-            self.provider_types.pop(provider_id, None)
-        else:
-            self.provider_types[provider_id] = provider_type
-
-        await self.put_kv_data("provider_types", self.provider_types)
-        yield event.plain_result(f"已将 {provider_id} 的余额查询类型设置为 {provider_type}")
-
-    @api_group.command("min_balance")
-    async def set_min_balance(self, event: AstrMessageEvent, min_bal: float):
-        """设置自动切换的最小余额阈值"""
-        self.min_balance = min_bal
-        await self.put_kv_data("min_balance", self.min_balance)
-        yield event.plain_result(f"最小余额阈值已设置为 {min_bal}")
 
     @api_group.command("balance")
     async def check_balance(self, event: AstrMessageEvent, provider_id: str = None):
@@ -191,25 +325,25 @@ class ApiMgrPlugin(Star):
                     yield event.plain_result(f"未找到 ID 为 {provider_id} 的提供商。")
                     return
         else:
-            target_providers = [p for p in providers if self._get_provider_type(p) != "none"]
+            target_providers = [
+                p for p in providers
+                if self._get_provider_display_type(p) != "none"
+            ]
 
         if not target_providers:
             yield event.plain_result("没有可查询余额的提供商。请先使用 /api set_type 设置类型。")
             return
 
-        yield event.plain_result("正在查询余额并刷新缓存...")
+        yield event.plain_result(f"🔍 正在查询 {len(target_providers)} 个提供商的余额...")
 
         results = []
         for p in target_providers:
             p_id = p.provider_config.get("id")
-            p_type = self._get_provider_type(p)
+            p_type = self._get_provider_display_type(p)
             if p_type == "none":
                 continue
 
             config = p.provider_config.get("config", {})
-            
-            # AstrBot stores API keys in provider_config['key'] as a list.
-            # Use get_current_key() if available, otherwise fall back to the list.
             api_key = None
             try:
                 api_key = p.get_current_key()
@@ -219,94 +353,121 @@ class ApiMgrPlugin(Star):
                 keys = p.provider_config.get("key") or config.get("key") or []
                 if isinstance(keys, list) and keys:
                     api_key = keys[0]
-                elif isinstance(keys, str) and keys:
+                elif isinstance(keys, str):
                     api_key = keys
 
             base_url = p.provider_config.get("base_url") or config.get("base_url")
             model_name = config.get("model") or p.provider_config.get("model")
 
             if not api_key:
-                results.append(f"❌ {p_id}: 未找到 API Key（请确认 AstrBot 中该提供商已配置 Key）")
+                results.append(f"❌ {p_id}: 未找到 API Key")
                 continue
 
-            balance = await ApiService.get_balance(p_type, api_key, base_url, model_name)
-            if "error" in balance:
-                results.append(f"❌ {p_id}: 查询失败 ({balance['error']})")
-                # Always persist error state so routing can skip it
-                self.balance_cache[p_id] = {"remaining": balance.get("remaining", 0), "error": balance["error"]}
+            result = await self._probe_provider(p_type, api_key, base_url, model_name)
+            if result.error:
+                results.append(f"❌ {p_id}: {result.error}")
+                self.balance_cache[p_id] = {"remaining": 0, "error": result.error}
             else:
-                self.balance_cache[p_id] = balance
-                results.append(f"✅ {p_id}: 剩余 {balance['remaining']} {balance['unit']}")
+                self.balance_cache[p_id] = result.to_dict()
+                results.append(f"✅ {p_id}: 剩余 {result.remaining} {result.unit}")
 
         await self.put_kv_data("balance_cache", self.balance_cache)
         yield event.plain_result("\n".join(results))
 
-    @api_group.command("batch_add")
-    async def batch_add_providers(self, event: AstrMessageEvent, prefix: str, base_url: str, api_key: str, models_str: str):
-        """
-        批量添加兼容 OpenAI 格式的模型提供商。
-        参数:
-        - prefix: 提供商标识前缀 (例如: deepseek)
-        - base_url: API 接口地址 (例如: https://api.deepseek.com/v1)
-        - api_key: 你的 API Key
-        - models_str: 逗号分隔的模型名列表 (例如: deepseek-chat,deepseek-reasoner)
-        
-        示例: /api batch_add ds https://api.deepseek.com/v1 sk-xxxx ds-chat,ds-coder
-        """
-        models = [m.strip() for m in models_str.split(",") if m.strip()]
-        if not models:
-            yield event.plain_result("错误：请至少提供一个模型名（使用逗号分隔）。")
+    @api_group.command("set_type")
+    async def set_provider_type(self, event: AstrMessageEvent, provider_id: str, provider_type: str):
+        """设置提供商的余额查询类型"""
+        valid_types = self._registry.get_all_probe_types() + ["none", "auto"]
+        provider_type = provider_type.lower()
+        if provider_type not in valid_types:
+            yield event.plain_result(f"无效的类型。支持: {', '.join(valid_types)}")
             return
-            
-        from astrbot.core import astrbot_config
-        
-        added_count = 0
-        added_ids = []
-        
-        for model in models:
-            provider_id = f"{prefix}/{model}"
-            
-            # Check if already exists
-            if any(p.get("id") == provider_id for p in astrbot_config["provider"]):
-                continue
-                
-            new_provider = {
-                "id": provider_id,
-                "type": "openai_chat_completion",
-                "enable": True,
-                "key": [api_key],
-                "config": {
-                    "base_url": base_url,
-                    "api_key": api_key,  # For redundancy
-                    "model": model,
-                    "proxy": ""
-                }
-            }
-            
-            astrbot_config["provider"].append(new_provider)
-            added_count += 1
-            added_ids.append(provider_id)
-            
-            # Hot reload into ProviderManager
-            try:
-                await self.context.provider_manager.reload(new_provider)
-            except Exception as e:
-                logger.error(f"API Manager: Failed to hot reload provider {provider_id}: {e}")
-                
-        if added_count == 0:
-            yield event.plain_result("没有添加任何新的模型（可能 ID 已存在）。")
+
+        providers = list(self.context.get_all_providers())
+        if provider_id.isdigit():
+            idx = int(provider_id) - 1
+            if 0 <= idx < len(providers):
+                provider_id = providers[idx].provider_config.get("id", provider_id)
+            else:
+                yield event.plain_result(f"序号 {provider_id} 超出范围。")
+                return
+
+        if provider_type == "auto":
+            self.provider_types.pop(provider_id, None)
+            self._registry.remove_override(provider_id)
+        else:
+            self.provider_types[provider_id] = provider_type
+            self._registry.set_override(provider_id, provider_type)
+
+        await self.put_kv_data("provider_types", self.provider_types)
+        yield event.plain_result(f"✅ 已将 {provider_id} 的余额查询类型设置为 {provider_type}")
+
+    @api_group.command("min_balance")
+    async def set_min_balance(self, event: AstrMessageEvent, min_bal: float):
+        """设置自动切换的最小余额阈值"""
+        self.min_balance = min_bal
+        await self.put_kv_data("min_balance", self.min_balance)
+        yield event.plain_result(f"✅ 最小余额阈值已设置为 {min_bal}")
+
+    @api_group.command("auto_scene")
+    async def toggle_auto_scene(self, event: AstrMessageEvent, enabled: str = "true"):
+        """开启/关闭自动场景切换"""
+        self.auto_scene_enabled = enabled.lower() in ("true", "1", "on", "yes")
+        await self.put_kv_data("auto_scene_enabled", self.auto_scene_enabled)
+        status = "已开启" if self.auto_scene_enabled else "已关闭"
+        yield event.plain_result(f"✅ 自动场景切换{status}")
+
+    @api_group.command("stats")
+    async def show_stats(self, event: AstrMessageEvent):
+        """显示路由统计信息"""
+        stats = self._stats.get_provider_stats()
+        if not stats:
+            yield event.plain_result("暂无路由统计数据。")
             return
-            
-        # Persist the changes to config.yml
-        try:
-            # In AstrBot v4, self.context.config_manager.default_conf is the global AstrBotConfig
-            self.context.config_manager.default_conf.save_config()
-        except Exception as e:
-            logger.error(f"API Manager: Failed to save config.yml: {e}")
-            yield event.plain_result(f"✅ 成功热加载了 {added_count} 个模型，但保存到配置文件失败，重启后可能失效。")
-            return
-            
-        yield event.plain_result(f"✅ 成功批量添加了 {added_count} 个模型：\n{', '.join(added_ids)}\n使用 /api list 可查看当前状态。")
+
+        msg = "📊 路由统计 (最近 7 天):\n"
+        msg += "─" * 40 + "\n"
+        for s in stats[:15]:
+            status = "✅" if s.error_rate < 0.1 else ("⚠️" if s.error_rate < 0.3 else "❌")
+            msg += f"{status} {s.provider_id}: {s.total_requests}次, 错误率 {s.error_rate:.1%}\n"
+
+        msg += "─" * 40 + "\n"
+        msg += f"使用 `/api stats reset` 重置统计"
+
+        yield event.plain_result(msg)
+
+    @api_group.command("cb")
+    async def circuit_breaker_cmd(self, event: AstrMessageEvent, action: str, provider_id: str = None):
+        """熔断器管理: cb list | cb reset <id> | cb half_open <id>"""
+        if action == "list":
+            stats = self._cb_registry.get_all()
+            if not stats:
+                yield event.plain_result("暂无熔断器数据。")
+                return
+            msg = "🔴 熔断器状态:\n"
+            for p_id, s in stats.items():
+                state_icon = {"CLOSED": "🟢", "OPEN": "🔴", "HALF_OPEN": "🟡"}.get(s.state.name, "⚪")
+                msg += f"{state_icon} {p_id}: {s.state} (失败: {s.total_failures})\n"
+            yield event.plain_result(msg)
+
+        elif action == "reset":
+            if not provider_id:
+                yield event.plain_result("请提供提供商 ID。")
+                return
+            cb = self._cb_registry.get(provider_id)
+            cb.reset()
+            yield event.plain_result(f"✅ 已重置 {provider_id} 的熔断器")
+
+        elif action == "half_open":
+            if not provider_id:
+                yield event.plain_result("请提供提供商 ID。")
+                return
+            cb = self._cb_registry.get(provider_id)
+            cb.half_open()
+            yield event.plain_result(f"✅ 已将 {provider_id} 的熔断器设为 HALF_OPEN")
+
+        else:
+            yield event.plain_result("用法: /api cb list | reset <id> | half_open <id>")
 
     @api_group.command("group")
     async def manage_groups(self, event: AstrMessageEvent, action: str, group_name: str = None, *provider_ids: str):
@@ -315,11 +476,12 @@ class ApiMgrPlugin(Star):
             if not self.groups:
                 yield event.plain_result("尚未配置任何路由组。")
                 return
-            msg = "当前路由组:\n"
+            msg = "📁 当前路由组:\n"
+            msg += "─" * 40 + "\n"
             for name, p_ids in self.groups.items():
-                active_mark = " (当前激活)" if name == self.active_group else ""
+                active_mark = " ⭐ (当前激活)" if name == self.active_group else ""
                 members = ', '.join(p_ids) if p_ids else "(空)"
-                msg += f"- {name}{active_mark}: {members}\n"
+                msg += f"• **{name}**{active_mark}: {members}\n"
             yield event.plain_result(msg)
             return
 
@@ -331,7 +493,7 @@ class ApiMgrPlugin(Star):
             if group_name in self.groups:
                 self.active_group = group_name
                 await self.put_kv_data("active_group", self.active_group)
-                yield event.plain_result(f"已切换到路由组: {group_name}")
+                yield event.plain_result(f"✅ 已切换到路由组: {group_name}")
             else:
                 yield event.plain_result(f"路由组 {group_name} 不存在。")
             return
@@ -343,13 +505,12 @@ class ApiMgrPlugin(Star):
                 if p_id not in self.groups[group_name]:
                     self.groups[group_name].append(p_id)
             await self.put_kv_data("groups", self.groups)
-            yield event.plain_result(f"已将 {', '.join(provider_ids)} 追加到组 {group_name}")
+            yield event.plain_result(f"✅ 已将 {', '.join(provider_ids)} 追加到组 {group_name}")
 
         elif action == "set":
-            # 覆盖写入，用于精确设置优先级（排在前面的优先级高）
             self.groups[group_name] = list(provider_ids)
             await self.put_kv_data("groups", self.groups)
-            yield event.plain_result(f"已重置组 {group_name}，当前优先级排序为: {', '.join(provider_ids)}")
+            yield event.plain_result(f"✅ 已重置组 {group_name}，当前优先级排序为: {', '.join(provider_ids)}")
 
         elif action == "remove":
             if group_name in self.groups:
@@ -357,7 +518,7 @@ class ApiMgrPlugin(Star):
                     if p_id in self.groups[group_name]:
                         self.groups[group_name].remove(p_id)
                 await self.put_kv_data("groups", self.groups)
-                yield event.plain_result(f"已从组 {group_name} 移除 {', '.join(provider_ids)}")
+                yield event.plain_result(f"✅ 已从组 {group_name} 移除 {', '.join(provider_ids)}")
             else:
                 yield event.plain_result(f"路由组 {group_name} 不存在。")
 
@@ -368,16 +529,95 @@ class ApiMgrPlugin(Star):
                     self.active_group = "default"
                 await self.put_kv_data("groups", self.groups)
                 await self.put_kv_data("active_group", self.active_group)
-                yield event.plain_result(f"已删除组 {group_name}")
+                yield event.plain_result(f"✅ 已删除组 {group_name}")
             else:
                 yield event.plain_result(f"路由组 {group_name} 不存在。")
 
         else:
             yield event.plain_result(f"未知操作: {action}。支持: add, set, remove, delete, list, use")
 
-    # ─────────────────────────────────────────────────────────────────
-    #  Runtime error learning (monkey-patch wrapper)
-    # ─────────────────────────────────────────────────────────────────
+    @api_group.command("batch_add")
+    async def batch_add_providers(self, event: AstrMessageEvent, prefix: str, base_url: str, api_key: str, models_str: str):
+        """批量添加兼容 OpenAI 格式的模型提供商。"""
+        models = [m.strip() for m in models_str.split(",") if m.strip()]
+        if not models:
+            yield event.plain_result("错误：请至少提供一个模型名（使用逗号分隔）。")
+            return
+
+        from astrbot.core import astrbot_config
+
+        added_count = 0
+        added_ids = []
+
+        for model in models:
+            provider_id = f"{prefix}/{model}"
+
+            if any(p.get("id") == provider_id for p in astrbot_config["provider"]):
+                continue
+
+            new_provider = {
+                "id": provider_id,
+                "type": "openai_chat_completion",
+                "enable": True,
+                "key": [api_key],
+                "config": {
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "model": model,
+                    "proxy": ""
+                }
+            }
+
+            astrbot_config["provider"].append(new_provider)
+            added_count += 1
+            added_ids.append(provider_id)
+
+            try:
+                await self.context.provider_manager.reload(new_provider)
+            except Exception as e:
+                logger.error(f"API Manager: Failed to hot reload provider {provider_id}: {e}")
+
+        if added_count == 0:
+            yield event.plain_result("没有添加任何新的模型（可能 ID 已存在）。")
+            return
+
+        try:
+            self.context.config_manager.default_conf.save_config()
+        except Exception as e:
+            logger.error(f"API Manager: Failed to save config.yml: {e}")
+            yield event.plain_result(f"✅ 成功热加载了 {added_count} 个模型，但保存到配置文件失败，重启后可能失效。")
+            return
+
+        yield event.plain_result(f"✅ 成功批量添加了 {added_count} 个模型：\n{', '.join(added_ids)}\n使用 /api list 可查看当前状态。")
+
+    @api_group.command("keywords")
+    async def manage_keywords(self, event: AstrMessageEvent, action: str, keyword: str = None, weight: float = None):
+        """管理场景检测关键词: keywords list | add <word> <weight> | remove <word>"""
+        if action == "list":
+            kw = self._scene_detector._reasoning.keywords
+            msg = "📝 当前推理场景关键词权重:\n"
+            for k, w in sorted(kw.items(), key=lambda x: -x[1])[:20]:
+                msg += f"• `{k}`: {w}\n"
+            yield event.plain_result(msg)
+
+        elif action == "add":
+            if not keyword or weight is None:
+                yield event.plain_result("用法: /api keywords add <word> <weight>")
+                return
+            self._scene_detector.add_keyword(keyword, weight)
+            yield event.plain_result(f"✅ 已添加关键词 '{keyword}' 权重 {weight}")
+
+        elif action == "remove":
+            if not keyword:
+                yield event.plain_result("用法: /api keywords remove <word>")
+                return
+            self._scene_detector.remove_keyword(keyword)
+            yield event.plain_result(f"✅ 已移除关键词 '{keyword}'")
+
+        else:
+            yield event.plain_result("用法: /api keywords list | add <word> <weight> | remove <word>")
+
+    # ── Runtime error monitoring ─────────────────────────────────────
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request):
@@ -393,26 +633,49 @@ class ApiMgrPlugin(Star):
         if not p_id:
             return
 
-        # Only wrap providers that are in our managed groups
+        # Check circuit breaker
+        cb = self._cb_registry.get(p_id)
+        if cb.is_open:
+            logger.warning(f"API Manager: Provider '{p_id}' circuit is OPEN, blocking request")
+            # Try to find fallback
+            if self.active_group in self.groups:
+                for fallback_id in self.groups[self.active_group]:
+                    if fallback_id != p_id:
+                        fallback_cb = self._cb_registry.get(fallback_id)
+                        if not fallback_cb.is_open:
+                            # Switch to fallback
+                            try:
+                                from astrbot.core.provider.entities import ProviderType
+                                await self.context.provider_manager.set_provider(
+                                    provider_id=fallback_id,
+                                    provider_type=ProviderType.CHAT_COMPLETION,
+                                    umo=event.unified_msg_origin
+                                )
+                                yield event.plain_result(f"♻️ [熔断切换] {p_id} 已熔断，自动切换至 {fallback_id}")
+                                return
+                            except Exception as e:
+                                logger.error(f"API Manager: Failed to switch to fallback {fallback_id}: {e}")
+
         all_managed_ids: set = set()
         for g in self.groups.values():
             all_managed_ids.update(g)
         if p_id not in all_managed_ids:
             return
 
-        # Guard: only wrap once per provider object lifetime
         if getattr(provider, "_api_mgr_wrapped", False):
             return
 
         original_text_chat = provider.text_chat
         original_text_chat_stream = provider.text_chat_stream
-        # Capture p_id via default arg to avoid late-binding closure issues
-        plugin_ref = self  # avoid self reference inside nested async gen
+        plugin_ref = self
 
         async def wrapped_text_chat(*args, _pid=p_id, **kwargs):
             try:
-                return await original_text_chat(*args, **kwargs)
+                result = await original_text_chat(*args, **kwargs)
+                plugin_ref._cb_registry.get(_pid).record_success()
+                return result
             except Exception as e:
+                plugin_ref._cb_registry.get(_pid).record_failure(e)
                 await plugin_ref._handle_runtime_error(_pid, e)
                 raise
 
@@ -420,14 +683,15 @@ class ApiMgrPlugin(Star):
             try:
                 async for resp in original_text_chat_stream(*args, **kwargs):
                     yield resp
+                plugin_ref._cb_registry.get(_pid).record_success()
             except Exception as e:
+                plugin_ref._cb_registry.get(_pid).record_failure(e)
                 await plugin_ref._handle_runtime_error(_pid, e)
                 raise
 
         provider.text_chat = wrapped_text_chat
         provider.text_chat_stream = wrapped_text_chat_stream
         provider._api_mgr_wrapped = True
-        logger.debug(f"API Manager: Wrapped provider '{p_id}' for runtime error monitoring.")
 
     async def _handle_runtime_error(self, p_id: str, e: Exception):
         """捕获运行时异常并更新余额缓存以隔离问题 Provider。"""
@@ -444,9 +708,7 @@ class ApiMgrPlugin(Star):
             except Exception as kv_err:
                 logger.error(f"API Manager: Failed to persist balance_cache after runtime error: {kv_err}")
 
-    # ─────────────────────────────────────────────────────────────────
-    #  Message routing (auto scene + failover)
-    # ─────────────────────────────────────────────────────────────────
+    # ── Message routing ──────────────────────────────────────────────
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
@@ -454,47 +716,53 @@ class ApiMgrPlugin(Star):
         if event.message_str.startswith("/api"):
             return
 
-        # ── Auto Scene Routing ──────────────────────────────────────
         msg_text = event.message_str
         group_name = self.active_group
         scene_switch_reason = None
+        scene_result: DetectionResult | None = None
 
-        # Only enable when BOTH 'daily' and 'reasoning' groups are configured
-        if "daily" in self.groups and "reasoning" in self.groups:
-            reasoning_keywords = [
-                "代码", "编程", "脚本", "推导", "分析", "写一个", "实现", "算法",
-                "bug", "报错", "为什么", "code", "python", "javascript", "java",
-                "c++", "数学", "逻辑"
-            ]
-            if any(k in msg_text.lower() for k in reasoning_keywords) or len(msg_text) >= 150:
+        # Auto Scene Routing (if enabled and both daily + reasoning groups exist)
+        if self.auto_scene_enabled and "daily" in self.groups and "reasoning" in self.groups:
+            scene_result = self._scene_detector.detect(msg_text)
+            if scene_result.category == "reasoning":
                 group_name = "reasoning"
                 if self.active_group != "reasoning":
-                    scene_switch_reason = "检测到复杂任务/代码/长文本"
+                    scene_switch_reason = f"检测到复杂任务 (置信度: {scene_result.confidence:.0%})"
             else:
                 group_name = "daily"
-                if self.active_group != "daily":
-                    scene_switch_reason = "检测到日常闲聊"
-        # ─────────────────────────────────────────────────────────────
 
         if group_name not in self.groups or not self.groups[group_name]:
             return
 
         group_providers = self.groups[group_name]
 
-        # Select the first provider in the group with sufficient balance
-        selected_provider_id = None
-        for p_id in group_providers:
-            if self._is_balance_sufficient(p_id):
-                selected_provider_id = p_id
-                break
+        # Build route list with balance checks
+        routes = [
+            ProviderRoute(provider_id=p_id, enabled=self._is_balance_sufficient(p_id))
+            for p_id in group_providers
+        ]
 
-        if not selected_provider_id:
-            # All providers exhausted — use first as last resort (will error and trigger AstrBot fallback)
-            selected_provider_id = group_providers[0]
-            logger.warning(f"API Manager: All providers in group '{group_name}' appear exhausted. Falling back to '{selected_provider_id}'.")
+        # Use balancer to select provider
+        decision = await self._balancer.route(
+            group_name=group_name,
+            routes=routes,
+            strategy=RoutingStrategy.PRIORITY,
+        )
 
-        logger.debug(f"API Manager: Routing {event.unified_msg_origin} → {selected_provider_id}")
-        event.set_extra("selected_provider", selected_provider_id)
+        selected_provider_id = decision.selected_provider_id
+
+        logger.debug(
+            f"API Manager: Routing {event.unified_msg_origin} → {selected_provider_id} "
+            f"(group={group_name}, scene={scene_result.category if scene_result else 'N/A'})"
+        )
+
+        # Log route
+        self._stats.log_route(
+            group_name=group_name,
+            provider_id=selected_provider_id,
+            scene=scene_result.category if scene_result else "",
+            success=True,
+        )
 
         # Track usage
         self.usage_cache[selected_provider_id] = self.usage_cache.get(selected_provider_id, 0) + 1
@@ -503,7 +771,7 @@ class ApiMgrPlugin(Star):
         except Exception as e:
             logger.warning(f"API Manager: Failed to persist usage_cache: {e}")
 
-        # Formally switch provider via ProviderManager if needed
+        # Switch provider if needed
         try:
             current_provider = self.context.get_using_provider(umo=event.unified_msg_origin)
         except Exception:
@@ -518,13 +786,16 @@ class ApiMgrPlugin(Star):
                     umo=event.unified_msg_origin
                 )
                 if scene_switch_reason:
-                    yield event.plain_result(f"🧠 [智能场景切换] {scene_switch_reason}，已自动为您分配最合适的模型组 ({group_name}): {selected_provider_id}")
+                    yield event.plain_result(
+                        f"🧠 [智能场景切换] {scene_switch_reason}，已自动分配模型组 ({group_name}): {selected_provider_id}"
+                    )
                 else:
-                    yield event.plain_result(f"♻️ [API 自动路由] 当前提供商 ({current_provider.meta().id}) 额度不足或不可用，已自动为您无缝切换至备用提供商: {selected_provider_id}")
+                    yield event.plain_result(
+                        f"♻️ [API 自动路由] 当前提供商额度不足，已自动切换至: {selected_provider_id}"
+                    )
             except Exception as e:
-                logger.error(f"API Manager: Failed to switch provider via ProviderManager: {e}")
+                logger.error(f"API Manager: Failed to switch provider: {e}")
 
-        # Set fallback chain for AstrBot core's native fallback mechanism
-        fallbacks = [p for p in group_providers if p != selected_provider_id]
-        if fallbacks:
-            event.set_extra("fallback_chat_models", fallbacks)
+        # Set fallback chain
+        if decision.fallback_chain:
+            event.set_extra("fallback_chat_models", decision.fallback_chain)

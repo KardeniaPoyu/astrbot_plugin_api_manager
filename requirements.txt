@@ -1,1 +1,3 @@
 aiohttp
+pybreaker>=1.4.0
+tenacity>=8.0.0
