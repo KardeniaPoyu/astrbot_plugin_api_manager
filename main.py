@@ -13,9 +13,38 @@ from __future__ import annotations
 
 import time
 import logging
+
+
+class _AstrBotLogFilter(logging.Filter):
+    """Inject AstrBot-required extra fields into every log record."""
+    _SHORT = {
+        "DEBUG": "DBUG", "INFO": "INFO", "WARNING": "WARN",
+        "ERROR": "ERRO", "CRITICAL": "CRIT",
+    }
+
+    def filter(self, record):
+        record.plugin_tag = "api_mgr"
+        record.short_levelname = self._SHORT.get(
+            record.levelname, record.levelname[:4].upper()
+        )
+        record.astrbot_version_tag = (
+            " [v4.25.0]" if record.levelno >= logging.WARNING else ""
+        )
+        d = os.path.dirname(record.pathname) or ""
+        record.source_file = (
+            os.path.basename(d) + "."
+            + os.path.basename(record.pathname).replace(".py", "")
+        )
+        record.source_line = record.lineno
+        record.is_trace = False
+        return True
+
+
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from astrbot.api.star import Context, Star, register
 
 if TYPE_CHECKING:
@@ -49,6 +78,8 @@ from storage.stats_store import StatsStore
 from monitor.periodic_check import PeriodicBalanceChecker
 
 logger = logging.getLogger("astrbot.api_mgr")
+logger.addFilter(_AstrBotLogFilter())
+logger.propagate = True
 
 # ── Constants ───────────────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 SQLite-based route statistics store.
 
 Tracks:
@@ -9,6 +9,7 @@ Tracks:
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -16,7 +17,43 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger("astrbot.api_mgr")
+
+_SHORT_LEVELS = {
+    logging.DEBUG: "DBUG",
+    logging.INFO: "INFO",
+    logging.WARNING: "WARN",
+    logging.ERROR: "ERRO",
+    logging.CRITICAL: "CRIT",
+}
+
+_ASTRBOT_VERSION_TAG = " [v4.25.0]"
+
+
+class _PluginLogAdapter(logging.LoggerAdapter):
+    """Auto-inject all six extra fields required by AstrBot's
+    ``_RecordEnricherFilter``, so the Loguru formatter never raises
+    ``ValueError: Formatting field not found in record``.
+    """
+
+    def __init__(self, base: logging.Logger, extra: dict | None = None) -> None:
+        super().__init__(base, extra or {})
+        self._src = os.path.basename(os.path.dirname(__file__)) + ".stats_store"
+
+    def log(self, level, msg, *args, **kwargs):
+        extra = dict(kwargs.get("extra") or {})
+        extra.setdefault("plugin_tag", "api_mgr")
+        extra.setdefault("short_levelname", _SHORT_LEVELS.get(level, "INFO"))
+        extra.setdefault(
+            "astrbot_version_tag", _ASTRBOT_VERSION_TAG if level >= logging.WARNING else ""
+        )
+        extra.setdefault("source_file", self._src)
+        extra.setdefault("source_line", 0)
+        extra.setdefault("is_trace", False)
+        kwargs["extra"] = extra
+        self.logger.log(level, msg, *args, **kwargs)
+
+
+logger = _PluginLogAdapter(logging.getLogger("astrbot.api_mgr"))
 
 
 @dataclass
@@ -250,3 +287,4 @@ class StatsStore:
         except Exception as e:
             logger.error(f"StatsStore: Failed to prune logs: {e}")
             return 0
+
